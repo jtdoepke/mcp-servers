@@ -1,0 +1,84 @@
+---
+# src: https://github.com/docker/build-push-action/issues/561#issuecomment-1054596444
+name: Build & publish MCP server images
+'on':
+  release:
+    types: [published]
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: ./server-1
+            image: ghcr.io/jtdoepke/mcp-server-1
+          - dir: ./server-2
+            image: ghcr.io/jtdoepke/mcp-server-2
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify commit signature
+      # TODO
+
+      - name: Set up cosign
+        uses: sigstore/cosign-installer@<PUT HASH HERE>
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GH_PACKAGE_TOKEN }}
+
+      - name: Verify base image
+        run: |
+          cosign dockerfile verify --base-image-only \
+            --certificate-oidc-issuer https://accounts.google.com \
+            --certificate-identity keyless@distroless.iam.gserviceaccount.com \
+            ${{ matrix.dir }}/Dockerfile
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@<PUT HASH HERE>
+        with:
+          images: ${{ matrix.image }}
+
+      - name: Build Docker images
+        uses: docker/build-push-action@<PUT HASH HERE>
+        with:
+          context: ${{ matrix.dir }}
+          file: Dockerfile
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Scan container image for security vulnerabilities
+        uses: crazy-max/ghaction-container-scan@<PUSH HASH HERE>
+        with:
+          image: ${{ matrix.image }}:<IMAGE_VERSION_HERE>
+
+      - name: Sign the container image
+        run: |
+          cosign sign --key env://COSIGN_KEY ${{ matrix.image }}:<IMAGE_VERSION_HERE>
+        shell: bash
+        env:
+          COSIGN_KEY: ${{secrets.COSIGN_KEY}}
+          COSIGN_PASSWORD: ${{secrets.COSIGN_PASSWORD}}
+
+      - name: Push Docker images
+
+      - name: Verify image signature
+        run: |
+          docker buildx imagetools inspect ${{ matrix.image }}:<IMAGE_VERSION_HERE>
+          docker pull ${{ matrix.image }}:<IMAGE_VERSION_HERE>
+          cosign verify --key cosign.pub ${{ matrix.image }}:<IMAGE_VERSION_HERE>

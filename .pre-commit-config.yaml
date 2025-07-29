@@ -1,0 +1,155 @@
+---
+repos:
+  # Security-focused hooks (highest priority for this repo)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-private-key
+        description: Detect private keys in commits
+      - id: detect-aws-credentials
+        description: Detect AWS credentials
+      - id: check-added-large-files
+        description: Prevent large files from being committed
+        args: ['--maxkb=1024']  # 1MB limit
+      - id: check-merge-conflict
+        description: Check for merge conflict markers
+      - id: check-case-conflict
+        description: Check for case conflicts
+      - id: check-symlinks
+        description: Check for broken symlinks
+
+  # Gitleaks for comprehensive secret scanning
+  - repo: https://github.com/zricethezav/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+        description: Scan for secrets using gitleaks
+
+  # Docker security and best practices
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint-docker
+        description: Lint Dockerfiles for best practices and security
+        args: [
+          '--ignore', 'DL3008',  # Pin versions in apt get install (can be overly strict)
+          '--ignore', 'DL3009',  # Delete apt cache (handled by multi-stage builds)
+        ]
+
+  # Shell script validation and formatting
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        description: Static analysis for shell scripts
+        args: ['--severity=warning']
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.12.0-2
+    hooks:
+      - id: shfmt-docker  # Docker image (requires Docker to run)
+
+  # YAML validation and linting
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+        description: Validate YAML syntax
+        # exclude: '^\.github/actions/'  # Some actions may have templated YAML
+      - id: check-json
+        description: Validate JSON syntax
+
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.37.1
+    hooks:
+      - id: yamllint
+        description: Lint YAML files for style and syntax
+        args: ['-d', '{extends: default, rules: {line-length: {max: 120}}}']
+        # exclude: '^\.github/actions/'  # GitHub Actions may have specific formatting
+
+  # GitHub Actions validation
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.7
+    hooks:
+      - id: actionlint-docker
+        description: Validate GitHub Actions workflows
+
+  # General code quality
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        description: Remove trailing whitespace
+        exclude: '\.md$'  # Preserve markdown formatting
+      - id: end-of-file-fixer
+        description: Ensure files end with newline
+      - id: mixed-line-ending
+        description: Ensure consistent line endings
+        args: ['--fix=lf']  # Force LF line endings
+
+  # Container security scanning (custom local hooks)
+  - repo: local
+    hooks:
+      - id: dockerfile-security-check
+        name: Dockerfile Security Check
+        entry: |
+          sh -c 'for dockerfile in $(find . -name "Dockerfile" -not -path "./.git/*"); do
+            echo "Checking $dockerfile for security issues...";
+
+            # Check for insecure ADD with HTTP URLs
+            if grep -q "ADD http:" "$dockerfile"; then
+              echo "ERROR: Using ADD with HTTP URLs in $dockerfile"; exit 1;
+            fi;
+
+            # Check for explicit root user usage
+            if grep -q "USER root" "$dockerfile" || grep -q "USER 0$" "$dockerfile"; then
+              echo "ERROR: Running as root user (USER root/USER 0) in $dockerfile"; exit 1;
+            fi;
+
+            # Check for missing USER statement in multi-stage builds
+            if grep -q "FROM.*AS.*" "$dockerfile"; then
+              # Multi-stage build - check runtime stage has USER statement
+              if ! grep -A 999 "^FROM [^A]" "$dockerfile" | grep -q "^USER [^0]"; then
+                echo "ERROR: Runtime stage missing non-root USER statement in $dockerfile"; exit 1;
+              fi;
+            elif ! grep -q "^USER " "$dockerfile"; then
+              echo "WARNING: No USER statement found in $dockerfile (recommended for security)";
+            fi;
+
+            # Check for COPY operations without --chown in multi-stage builds
+            if grep -q "FROM.*AS.*" "$dockerfile"; then
+              if grep -q "COPY --from=" "$dockerfile" && ! grep -q "COPY --from=.*--chown=" "$dockerfile"; then
+                echo "WARNING: COPY --from operations should include --chown for proper file ownership in $dockerfile";
+              fi;
+            fi;
+
+            echo "✓ $dockerfile passed security checks";
+          done'
+        language: system
+        files: 'Dockerfile$'
+        pass_filenames: false
+
+      - id: dockerfile-nonroot-validation
+        name: Dockerfile Non-Root Validation
+        entry: |
+          sh -c 'for dockerfile in $(find . -name "Dockerfile" -not -path "./.git/*"); do
+            echo "Validating non-root compliance for $dockerfile...";
+
+            # Ensure runtime stage uses non-root base image or explicit USER change
+            runtime_stage=$(grep -n "^FROM [^A]" "$dockerfile" | tail -1)
+            if [ -n "$runtime_stage" ]; then
+              line_num=$(echo "$runtime_stage" | cut -d: -f1)
+              runtime_content=$(tail -n +$line_num "$dockerfile")
+
+              # Check if using nonroot base image OR has USER statement
+              if echo "$runtime_content" | grep -q ":nonroot" || echo "$runtime_content" | grep -q "^USER [^0]"; then
+                echo "✓ $dockerfile uses non-root execution";
+              else
+                echo "ERROR: $dockerfile runtime stage must use :nonroot base image or explicit non-root USER";
+                exit 1;
+              fi;
+            fi;
+          done'
+        language: system
+        files: 'Dockerfile$'
+        pass_filenames: false

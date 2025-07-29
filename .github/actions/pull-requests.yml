@@ -1,0 +1,11 @@
+---
+- name: Require Verified Commits Action
+  uses: yumemi-inc/require-verified-commits-action@v1.1.1
+
+- name: Run GitHub Actions Security Checker
+  uses: twinsunllc/github-actions-security-checker@3431967fb16dd3d0e96fcf823ba33609c2df31ee  # v1.4.1
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+
+- name: Verified Github Authors
+  uses: joshwooding/verified-github-author-action@v0.1.2

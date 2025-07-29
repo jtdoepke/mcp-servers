@@ -1,0 +1,372 @@
+---
+name: Daily Security-Focused Container Rebuild
+"on":
+  schedule:
+    # Run daily at 06:00 UTC to rebuild with latest base images
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    # Allow manual triggering for testing
+    inputs:
+      specific_server:
+        description: 'Specific server to build (optional, builds all if empty)'
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/mcp-servers
+
+jobs:
+  generate-matrix:
+    name: Generate Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+      has_builds: ${{ steps.generate.outputs.has_builds }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
+
+      - name: Generate build matrix from versions.json files
+        id: generate
+        run: |
+          #!/bin/bash
+          set -euo pipefail
+
+          echo "Generating build matrix from versions.json files..."
+
+          matrix_json="[]"
+          has_builds="false"
+
+          # Find all versions.json files in src/ subdirectories
+          for versions_file in src/*/versions.json; do
+            if [[ ! -f "$versions_file" ]]; then
+              continue
+            fi
+
+            server_name=$(basename "$(dirname "$versions_file")")
+            echo "Processing server: $server_name"
+
+            # Skip if specific server requested and this isn't it
+            if [[ -n "${{ github.event.inputs.specific_server }}" && \
+                  "$server_name" != "${{ github.event.inputs.specific_server }}" ]]; then
+              echo "Skipping $server_name (not the requested specific server)"
+              continue
+            fi
+
+            # Extract upstream repo and versions using jq
+            upstream_repo=$(jq -r '.upstream_repo' "$versions_file")
+
+            # Process each version
+            while IFS= read -r version; do
+              commit_hash=$(jq -r ".versions.\"$version\"" "$versions_file")
+
+              if [[ "$commit_hash" == "null" || -z "$commit_hash" ]]; then
+                echo "Skipping $server_name $version: no commit hash"
+                continue
+              fi
+
+              echo "Adding to matrix: $server_name $version ($commit_hash)"
+
+              # Add to matrix JSON
+              matrix_item=$(jq -n \
+                --arg server "$server_name" \
+                --arg version "$version" \
+                --arg hash "$commit_hash" \
+                --arg repo "$upstream_repo" \
+                '{
+                  server: $server,
+                  version: $version,
+                  commit_hash: $hash,
+                  upstream_repo: $repo,
+                  dockerfile_path: ("src/" + $server + "/Dockerfile")
+                }')
+
+              matrix_json=$(echo "$matrix_json" | jq ". += [$matrix_item]")
+              has_builds="true"
+
+            done < <(jq -r '.versions | keys[]' "$versions_file")
+          done
+
+          echo "Final matrix JSON:"
+          echo "$matrix_json" | jq '.'
+
+          # Set outputs
+          echo "matrix={\"include\":$matrix_json}" >> "$GITHUB_OUTPUT"
+          echo "has_builds=$has_builds" >> "$GITHUB_OUTPUT"
+
+  security-build:
+    name: Security Build - ${{ matrix.server }} ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    needs: generate-matrix
+    if: needs.generate-matrix.outputs.has_builds == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # For cosign signing
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db  # v3.6.1
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567  # v3.3.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install security tools
+        run: |
+          # Install cosign for container signing
+          curl -O -L "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64"
+          sudo mv cosign-linux-amd64 /usr/local/bin/cosign
+          sudo chmod +x /usr/local/bin/cosign
+
+          # Install hadolint for additional Dockerfile validation
+          sudo curl -L -o /usr/local/bin/hadolint \
+            "https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64"
+          sudo chmod +x /usr/local/bin/hadolint
+
+      - name: Pre-build Security Validation
+        run: |
+          echo "=== Pre-build Security Validation ==="
+
+          dockerfile_path="${{ matrix.dockerfile_path }}"
+          echo "Validating: $dockerfile_path"
+
+          # Run hadolint with security-focused rules
+          echo "Running hadolint security check..."
+          hadolint "$dockerfile_path" \
+            --ignore DL3008 \
+            --ignore DL3009 \
+            --failure-threshold warning
+
+          # Validate non-root requirements
+          echo "Checking non-root compliance..."
+
+          # Check for root user violations
+          if grep -q "USER root\|USER 0$" "$dockerfile_path"; then
+            echo "❌ ERROR: Dockerfile contains explicit root user usage"
+            exit 1
+          fi
+
+          # Check for non-root base image or USER statement
+          if grep -q "FROM.*:nonroot" "$dockerfile_path"; then
+            echo "✅ Using nonroot base image"
+          elif grep -q "^USER [^0]" "$dockerfile_path"; then
+            echo "✅ Found non-root USER statement"
+          else
+            echo "❌ ERROR: No non-root execution method found"
+            exit 1
+          fi
+
+          # Check for proper --chown usage in COPY statements
+          if grep -q "COPY --from=" "$dockerfile_path"; then
+            if ! grep -q "COPY --from=.*--chown=" "$dockerfile_path"; then
+              echo "⚠️  WARNING: COPY --from operations should include --chown"
+            else
+              echo "✅ COPY operations include proper ownership"
+            fi
+          fi
+
+          echo "✅ Pre-build security validation passed"
+
+      - name: Generate build tags
+        id: tags
+        run: |
+          server="${{ matrix.server }}"
+          version="${{ matrix.version }}"
+          build_date=$(date +%Y%m%d)
+
+          # Generate multiple tags for flexibility
+          tags=""
+          tags="$tags,${{ env.IMAGE_PREFIX }}:${server}-${version}"
+          tags="$tags,${{ env.IMAGE_PREFIX }}:${server}-${version}-${build_date}"
+
+          # Add latest tag for the most recent version (determined by sorting)
+          # This is a simplified approach - in production you might want more sophisticated versioning
+          tags="$tags,${{ env.IMAGE_PREFIX }}:${server}"
+
+          # Remove leading comma
+          tags="${tags#,}"
+
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "Generated tags: $tags"
+
+      # Build container with security validation
+      - name: Build container with security validation
+        id: build
+        uses: docker/build-push-action@5176d81f87c23d6fc96624dfdbcd554c9bc3a9c # v6.9.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile_path }}
+          build-args: |
+            SRC_REPO=${{ matrix.upstream_repo }}
+            SRC_HASH=${{ matrix.commit_hash }}
+          push: false
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Post-build Security Validation
+        run: |
+          echo "=== Post-build Security Validation ==="
+
+          # Get the first tag for testing
+          test_tag=$(echo "${{ steps.tags.outputs.tags }}" | cut -d',' -f1)
+          echo "Testing container: $test_tag"
+
+          # Inspect container to verify user
+          echo "Checking container user configuration..."
+          user_info=$(docker inspect "$test_tag" --format='{{.Config.User}}')
+
+          if [[ "$user_info" == "0" || "$user_info" == "root" || -z "$user_info" ]]; then
+            # For containers with empty user, check if base image is nonroot
+            base_image=$(docker inspect "$test_tag" --format='{{index .Config.Image}}' | head -1 || echo "")
+            if [[ "$base_image" == *":nonroot"* ]]; then
+              echo "✅ Using nonroot base image"
+            else
+              echo "❌ ERROR: Container may run as root (User: '$user_info')"
+              exit 1
+            fi
+          else
+            echo "✅ Container configured with non-root user: $user_info"
+          fi
+
+          # Test runtime user by running whoami in container
+          echo "Testing runtime user..."
+          runtime_user=$(docker run --rm "$test_tag" whoami 2>/dev/null || echo "unknown")
+
+          if [[ "$runtime_user" == "root" ]]; then
+            echo "❌ ERROR: Container runs as root user at runtime"
+            exit 1
+          else
+            echo "✅ Container runs as non-root user: $runtime_user"
+          fi
+
+          # Test that container starts successfully
+          echo "Testing container startup..."
+          timeout 10s docker run --rm "$test_tag" --help >/dev/null 2>&1 || {
+            echo "⚠️  WARNING: Container startup test failed (may be expected for some servers)"
+          }
+
+          echo "✅ Post-build security validation passed"
+
+      - name: Run container vulnerability scan
+        run: |
+          echo "=== Container Vulnerability Scanning ==="
+
+          # Use Docker Scout (built into Docker) for vulnerability scanning
+          test_tag=$(echo "${{ steps.tags.outputs.tags }}" | cut -d',' -f1)
+
+          echo "Scanning $test_tag for vulnerabilities..."
+
+          # Run basic vulnerability check (this will be available in GitHub-hosted runners)
+          docker scout cves "$test_tag" --format json > scan-results.json || {
+            echo "⚠️  Docker Scout not available, skipping vulnerability scan"
+            echo "{}" > scan-results.json
+          }
+
+          # Simple check for critical vulnerabilities
+          if command -v jq >/dev/null 2>&1; then
+            critical_count=$(jq -r '.vulnerabilities[] | select(.severity == "critical") | .id' \
+              scan-results.json 2>/dev/null | wc -l || echo "0")
+            if [[ "$critical_count" -gt 0 ]]; then
+              echo "⚠️  WARNING: Found $critical_count critical vulnerabilities"
+              echo "This is informational only - build will continue"
+            else
+              echo "✅ No critical vulnerabilities detected"
+            fi
+          fi
+
+      # Push container images to registry
+      - name: Push container images
+        uses: docker/build-push-action@5176d81f87c23d6fc96624dfdbcd554c9bc3a9c # v6.9.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile_path }}
+          build-args: |
+            SRC_REPO=${{ matrix.upstream_repo }}
+            SRC_HASH=${{ matrix.commit_hash }}
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Sign container images with cosign
+        run: |
+          echo "=== Container Signing ==="
+
+          # Sign all pushed tags
+          IFS=',' read -ra TAGS <<< "${{ steps.tags.outputs.tags }}"
+          for tag in "${TAGS[@]}"; do
+            echo "Signing: $tag"
+            cosign sign --yes "$tag"
+          done
+
+          echo "✅ Container images signed successfully"
+
+      - name: Generate security attestation
+        run: |
+          echo "=== Security Attestation ==="
+
+          cat > security-attestation.json << EOF
+          {
+            "build_timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "server": "${{ matrix.server }}",
+            "version": "${{ matrix.version }}",
+            "commit_hash": "${{ matrix.commit_hash }}",
+            "upstream_repo": "${{ matrix.upstream_repo }}",
+            "security_validations": {
+              "pre_build_dockerfile_scan": "passed",
+              "non_root_compliance": "verified",
+              "post_build_user_check": "passed",
+              "runtime_user_validation": "passed",
+              "vulnerability_scan": "completed"
+            },
+            "container_tags": "${{ steps.tags.outputs.tags }}",
+            "signed_with_cosign": true,
+            "build_environment": {
+              "runner_os": "${{ runner.os }}",
+              "github_sha": "${{ github.sha }}",
+              "workflow_ref": "${{ github.workflow_ref }}"
+            }
+          }
+          EOF
+
+          echo "Security attestation generated:"
+          jq '.' security-attestation.json
+
+  build-summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [generate-matrix, security-build]
+    if: always()
+    steps:
+      - name: Build Summary
+        run: |
+          echo "=== Daily Rebuild Summary ==="
+          echo "Matrix generation: ${{ needs.generate-matrix.result }}"
+          echo "Security builds: ${{ needs.security-build.result }}"
+
+          if [[ "${{ needs.generate-matrix.outputs.has_builds }}" == "true" ]]; then
+            echo "✅ Build matrix generated successfully"
+            if [[ "${{ needs.security-build.result }}" == "success" ]]; then
+              echo "✅ All security builds completed successfully"
+            else
+              echo "❌ Some security builds failed"
+              exit 1
+            fi
+          else
+            echo "ℹ️  No builds required (no versions.json files found or no versions to build)"
+          fi

@@ -1,0 +1,58 @@
+# Security-First Python MCP Server Template (Distroless - Preferred)
+#
+# This template uses Google's Distroless images for maximum security:
+# - Minimal attack surface (no shell, no package managers)
+# - Runs as non-root user (UID 65532)
+# - Multi-stage build for clean separation of concerns
+# - Proper file ownership and permissions
+
+ARG SRC_REPO=https://github.com/example/mcp-server-repo
+ARG SRC_HASH=
+
+# BUILD STAGE - Uses full Python image for building
+FROM python:3.11 AS builder
+
+# Install git for cloning repositories
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends git
+
+# Clone source repository
+RUN git clone "$SRC_REPO" /repo
+
+WORKDIR /repo
+
+# Checkout specific commit hash for security
+RUN git checkout "$SRC_HASH"
+
+# For monorepo structures, cd to the specific server directory
+WORKDIR /repo/src/your-server-name
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install the package if it has setup.py/pyproject.toml
+# RUN pip install .
+
+# RUNTIME STAGE - Distroless for maximum security
+FROM gcr.io/distroless/python3-debian12:nonroot
+
+WORKDIR /app
+ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONPATH="/app"
+
+# Copy virtual environment and application with proper ownership
+COPY --from=builder --chown=65532:65532 /opt/venv /opt/venv
+COPY --from=builder --chown=65532:65532 /repo /app
+
+# Explicitly set non-root user (redundant with :nonroot base but explicit for clarity)
+USER 65532
+
+# Use array form for ENTRYPOINT for better signal handling
+ENTRYPOINT ["python", "-m", "your_server_module"]
+
+# Health check (optional - adjust command as needed)
+# HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+#   CMD python -c "import sys; sys.exit(0)" || exit 1
