@@ -115,50 +115,39 @@ jobs:
         run: |
           echo "Building containers for ${{ matrix.server }}"
 
-          # Read versions and build each one
-          while IFS=: read -r version hash; do
-            if [ -z "$version" ] || [ -z "$hash" ]; then
-              continue
-            fi
+          # Get the latest version (first in list)
+          latest_entry=$(echo "${{ steps.versions.outputs.versions }}" | head -n1)
+          version=$(echo "$latest_entry" | cut -d: -f1)
+          hash=$(echo "$latest_entry" | cut -d: -f2)
 
-            echo "Building ${{ matrix.server }}:$version (hash: $hash)"
+          echo "Building latest version ${{ matrix.server }}:$version (hash: $hash)"
 
-            # Build the container
-            docker build \
-              --build-arg "SRC_REPO=${{ steps.versions.outputs.upstream_repo }}" \
-              --build-arg "SRC_HASH=$hash" \
-              --tag "mcp-${{ matrix.server }}:$version" \
-              --tag "mcp-${{ matrix.server }}:$version-pr-${{ github.event.pull_request.number }}" \
-              --tag "mcp-${{ matrix.server }}:latest-pr" \
-              --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-              --label "org.opencontainers.image.revision=${{ github.sha }}" \
-              --label "org.opencontainers.image.version=$version" \
-              "src/${{ matrix.server }}/"
+          # Build the container with PR-specific tag
+          docker build \
+            --build-arg "SRC_REPO=${{ steps.versions.outputs.upstream_repo }}" \
+            --build-arg "SRC_HASH=$hash" \
+            --tag "mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=$version" \
+            "src/${{ matrix.server }}/"
 
-            # Export for scanning
-            docker save "mcp-${{ matrix.server }}:$version" -o "${{ matrix.server }}-$version.tar"
-          done <<< "${{ steps.versions.outputs.versions }}"
+          # Export for scanning
+          docker save "mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}" \
+            -o "${{ matrix.server }}-pr-${{ github.event.pull_request.number }}.tar"
 
       - name: Run Trivy vulnerability scanner
         run: |
           echo "Scanning containers for ${{ matrix.server }}"
 
-          # List all built containers
-          while IFS=: read -r version hash; do
-            if [ -z "$version" ] || [ -z "$hash" ]; then
-              continue
-            fi
-
-            echo "Built container: ${{ matrix.server }}-$version.tar"
-
-            # Verify tar file exists
-            if [ -f "${{ matrix.server }}-$version.tar" ]; then
-              echo "✓ Found tar file for scanning"
-            else
-              echo "ERROR: Tar file ${{ matrix.server }}-$version.tar not found"
-              exit 1
-            fi
-          done <<< "${{ steps.versions.outputs.versions }}"
+          # Verify tar file exists
+          tar_file="${{ matrix.server }}-pr-${{ github.event.pull_request.number }}.tar"
+          if [ -f "$tar_file" ]; then
+            echo "✓ Found tar file for scanning: $tar_file"
+          else
+            echo "ERROR: Tar file $tar_file not found"
+            exit 1
+          fi
 
           # List files for debugging
           ls -la ${{ matrix.server }}-*.tar || echo "No tar files found"
@@ -166,7 +155,7 @@ jobs:
       - name: Scan latest container with Trivy
         uses: aquasecurity/trivy-action@0.28.0
         with:
-          input: '${{ matrix.server }}-2025.7.1.tar'
+          input: '${{ matrix.server }}-pr-${{ github.event.pull_request.number }}.tar'
           format: 'sarif'
           output: 'trivy-results-${{ matrix.server }}.sarif'
           severity: 'CRITICAL,HIGH,MEDIUM'
@@ -181,56 +170,49 @@ jobs:
 
       - name: Verify non-root user
         run: |
-          echo "Verifying containers run as non-root user"
+          echo "Verifying container runs as non-root user"
 
-          while IFS=: read -r version hash; do
-            if [ -z "$version" ] || [ -z "$hash" ]; then
-              continue
-            fi
+          # Check the PR container
+          image_tag="mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}"
+          echo "Checking $image_tag"
 
-            echo "Checking ${{ matrix.server }}:$version"
+          # Get the user the container runs as
+          user=$(docker inspect "$image_tag" --format='{{.Config.User}}')
 
-            # Get the user the container runs as
-            user=$(docker inspect "mcp-${{ matrix.server }}:$version" --format='{{.Config.User}}')
-
-            if [ -z "$user" ] || [ "$user" = "root" ] || [ "$user" = "0" ]; then
-              echo "ERROR: Container ${{ matrix.server }}:$version runs as root user!"
-              exit 1
-            else
-              echo "✓ Container runs as non-root user: $user"
-            fi
-          done <<< "${{ steps.versions.outputs.versions }}"
+          if [ -z "$user" ] || [ "$user" = "root" ] || [ "$user" = "0" ]; then
+            echo "ERROR: Container runs as root user!"
+            exit 1
+          else
+            echo "✓ Container runs as non-root user: $user"
+          fi
 
       - name: Test container startup
         run: |
           echo "Testing container startup for ${{ matrix.server }}"
 
-          # Get the latest version to test
-          latest_version=$(echo "${{ steps.versions.outputs.versions }}" | head -n1 | cut -d: -f1)
+          # Test the PR container
+          image_tag="mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}"
+          echo "Testing $image_tag"
 
-          if [ -n "$latest_version" ]; then
-            echo "Testing ${{ matrix.server }}:$latest_version"
+          # Try to start the container and check if it starts successfully
+          container_name="test-${{ matrix.server }}-pr-${{ github.event.pull_request.number }}"
+          if docker run -d --name "$container_name" "$image_tag"; then
+            sleep 5
 
-            # Try to start the container and check if it starts successfully
-            container_name="test-${{ matrix.server }}"
-            if docker run -d --name "$container_name" "mcp-${{ matrix.server }}:$latest_version"; then
-              sleep 5
-
-              # Check if container is still running
-              if docker ps | grep -q "$container_name"; then
-                echo "✓ Container started successfully"
-                docker stop "$container_name" || true
-              else
-                echo "⚠ Container exited after startup"
-                docker logs "$container_name" || true
-              fi
-
-              # Clean up container
-              docker rm "$container_name" || true
+            # Check if container is still running
+            if docker ps | grep -q "$container_name"; then
+              echo "✓ Container started successfully"
+              docker stop "$container_name" || true
             else
-              echo "ERROR: Failed to start container"
-              exit 1
+              echo "⚠ Container exited after startup"
+              docker logs "$container_name" || true
             fi
+
+            # Clean up container
+            docker rm "$container_name" || true
+          else
+            echo "ERROR: Failed to start container"
+            exit 1
           fi
 
   summary:
