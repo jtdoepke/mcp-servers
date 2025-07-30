@@ -213,7 +213,7 @@ jobs:
 
             # Try to start the container and check if it starts successfully
             container_name="test-${{ matrix.server }}"
-            if docker run --rm -d --name "$container_name" "mcp-${{ matrix.server }}:$latest_version"; then
+            if docker run -d --name "$container_name" "mcp-${{ matrix.server }}:$latest_version"; then
               sleep 5
 
               # Check if container is still running
@@ -224,6 +224,9 @@ jobs:
                 echo "⚠ Container exited after startup"
                 docker logs "$container_name" || true
               fi
+
+              # Clean up container
+              docker rm "$container_name" || true
             else
               echo "ERROR: Failed to start container"
               exit 1
