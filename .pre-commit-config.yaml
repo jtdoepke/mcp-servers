@@ -74,6 +74,21 @@ repos:
       - id: actionlint-docker
         description: Validate GitHub Actions workflows
 
+  # Python code formatting
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: '25.1.0'
+    hooks:
+      - id: black
+        description: Format Python code with Black
+        language_version: python3
+
+  # EditorConfig compliance
+  - repo: https://github.com/editorconfig-checker/editorconfig-checker.python
+    rev: '3.2.1'
+    hooks:
+      - id: editorconfig-checker
+        description: Check .editorconfig compliance
+
   # General code quality
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

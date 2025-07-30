@@ -25,12 +25,14 @@ def get_github_api_headers() -> Dict[str, str]:
     """Get headers for GitHub API requests with required auth token."""
     headers = {
         "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "mcp-servers-pr-creation/1.0"
+        "User-Agent": "mcp-servers-pr-creation/1.0",
     }
 
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
-        raise ValueError("GITHUB_TOKEN environment variable is required for PR creation")
+        raise ValueError(
+            "GITHUB_TOKEN environment variable is required for PR creation"
+        )
 
     headers["Authorization"] = f"token {token}"
     return headers
@@ -39,7 +41,9 @@ def get_github_api_headers() -> Dict[str, str]:
 def run_git_command(cmd: List[str], cwd: Path) -> str:
     """Run a git command and return the output."""
     try:
-        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, check=True
+        )
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
         print(f"Git command failed: {' '.join(cmd)}")
@@ -83,8 +87,14 @@ def get_current_repo_info(repo_dir: Path) -> tuple[str, str]:
         raise ValueError(f"Could not determine repository info: {e}")
 
 
-def create_github_pr(owner: str, repo: str, head_branch: str, title: str,
-                    body: str, assignee: str = "jtdoepke") -> Dict:
+def create_github_pr(
+    owner: str,
+    repo: str,
+    head_branch: str,
+    title: str,
+    body: str,
+    assignee: str = "jtdoepke",
+) -> Dict:
     """Create a pull request on GitHub."""
     url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
     headers = get_github_api_headers()
@@ -94,7 +104,7 @@ def create_github_pr(owner: str, repo: str, head_branch: str, title: str,
         "body": body,
         "head": head_branch,
         "base": "main",  # Adjust if main branch has different name
-        "assignees": [assignee]
+        "assignees": [assignee],
     }
 
     try:
@@ -103,7 +113,7 @@ def create_github_pr(owner: str, repo: str, head_branch: str, title: str,
         return response.json()
     except requests.RequestException as e:
         print(f"Error creating PR: {e}")
-        if hasattr(e, 'response') and e.response:
+        if hasattr(e, "response") and e.response:
             print(f"Response: {e.response.text}")
         raise
 
@@ -119,13 +129,16 @@ def generate_pr_title(server_name: str, versions: Dict[str, str]) -> str:
         return f"Add {len(version_list)} new {server_name} versions"
 
 
-def generate_pr_body(server_name: str, versions: Dict[str, str],
-                    upstream_repo: str) -> str:
+def generate_pr_body(
+    server_name: str, versions: Dict[str, str], upstream_repo: str
+) -> str:
     """Generate a comprehensive PR description with security notes."""
-    version_table = "\n".join([
-        f"| {version} | `{commit_hash}` |"
-        for version, commit_hash in versions.items()
-    ])
+    version_table = "\n".join(
+        [
+            f"| {version} | `{commit_hash}` |"
+            for version, commit_hash in versions.items()
+        ]
+    )
 
     return f"""## Version Update: {server_name}
 
@@ -177,7 +190,7 @@ Manual review is required before merging to ensure security compliance.
 
 def update_versions_file(versions_file: Path, new_versions: Dict[str, str]) -> None:
     """Update the versions.json file with new versions."""
-    with open(versions_file, 'r') as f:
+    with open(versions_file, "r") as f:
         config = json.load(f)
 
     # Add new versions to existing ones
@@ -186,9 +199,9 @@ def update_versions_file(versions_file: Path, new_versions: Dict[str, str]) -> N
     config["versions"] = current_versions
 
     # Write back with proper formatting
-    with open(versions_file, 'w') as f:
+    with open(versions_file, "w") as f:
         json.dump(config, f, indent=2, sort_keys=True)
-        f.write('\n')  # Ensure newline at end
+        f.write("\n")  # Ensure newline at end
 
 
 def validate_new_versions(versions: Dict[str, str], upstream_repo: str) -> bool:
@@ -213,14 +226,23 @@ def validate_new_versions(versions: Dict[str, str], upstream_repo: str) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="Create PR for version updates")
-    parser.add_argument("--root", type=Path, default=Path("."),
-                       help="Root directory of the repository")
-    parser.add_argument("--server", type=str, required=True,
-                       help="Server name to create PR for")
-    parser.add_argument("--versions", type=str, required=True,
-                       help="JSON string of versions to add (e.g., '{\"v1.0.0\": \"abc123\"}')")
-    parser.add_argument("--dry-run", action="store_true",
-                       help="Show what would be done without creating PR")
+    parser.add_argument(
+        "--root", type=Path, default=Path("."), help="Root directory of the repository"
+    )
+    parser.add_argument(
+        "--server", type=str, required=True, help="Server name to create PR for"
+    )
+    parser.add_argument(
+        "--versions",
+        type=str,
+        required=True,
+        help='JSON string of versions to add (e.g., \'{"v1.0.0": "abc123"}\')',
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without creating PR",
+    )
 
     args = parser.parse_args()
 
@@ -243,7 +265,7 @@ def main():
         sys.exit(1)
 
     # Load existing config for upstream repo info
-    with open(versions_file, 'r') as f:
+    with open(versions_file, "r") as f:
         config = json.load(f)
 
     upstream_repo = config.get("upstream_repo", "unknown")
@@ -289,8 +311,9 @@ def main():
         pr_body = generate_pr_body(args.server, new_versions, upstream_repo)
 
         print("Creating GitHub PR...")
-        pr_response = create_github_pr(repo_owner, repo_name, branch_name,
-                                     pr_title, pr_body)
+        pr_response = create_github_pr(
+            repo_owner, repo_name, branch_name, pr_title, pr_body
+        )
 
         print(f"✅ PR created successfully!")
         print(f"   URL: {pr_response['html_url']}")

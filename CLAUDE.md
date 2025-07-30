@@ -149,10 +149,10 @@ When upstream versions are discovered to have security issues:
 
 1. Create directory under `src/new-server-name/`
 2. Add Dockerfile following the multi-stage security pattern with **non-root requirements**:
-   - Preferred: Use `gcr.io/distroless/` base images
-   - Alternative: Any base image with explicit `USER` change to non-root
-   - All COPY operations must include `--chown` with the runtime user
-   - Container must run as non-root user, never root (UID 65532 preferred)
+  - Preferred: Use `gcr.io/distroless/` base images
+  - Alternative: Any base image with explicit `USER` change to non-root
+  - All COPY operations must include `--chown` with the runtime user
+  - Container must run as non-root user, never root (UID 65532 preferred)
 3. Create `versions.json` with upstream repository and initial version
 4. Update GitHub Actions matrix (auto-detected from config files)
 5. Test local build and security scanning, including non-root validation

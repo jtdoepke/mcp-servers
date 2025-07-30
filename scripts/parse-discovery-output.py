@@ -5,35 +5,37 @@ import json
 import subprocess
 import sys
 
+
 def parse_discovery_output(server_name):
     """Run discovery for a specific server and parse the output."""
     # Run discovery for specific server
     result = subprocess.run(
-        ['python', 'scripts/discover-versions.py', '--server', server_name],
+        ["python", "scripts/discover-versions.py", "--server", server_name],
         capture_output=True,
-        text=True
+        text=True,
     )
 
     # Parse the output to extract new versions
-    output_lines = result.stdout.split('\n')
+    output_lines = result.stdout.split("\n")
     new_versions = {}
 
     capture_versions = False
     for line in output_lines:
-        if f'New versions found for {server_name}:' in line:
+        if f"New versions found for {server_name}:" in line:
             capture_versions = True
             continue
-        elif capture_versions and line.strip().startswith('  '):
+        elif capture_versions and line.strip().startswith("  "):
             # Parse lines like '    v1.0.0: abc123hash'
-            if ':' in line:
-                version, hash_val = line.strip().split(':', 1)
+            if ":" in line:
+                version, hash_val = line.strip().split(":", 1)
                 new_versions[version.strip()] = hash_val.strip()
-        elif capture_versions and not line.strip().startswith('  '):
+        elif capture_versions and not line.strip().startswith("  "):
             break
 
     return new_versions
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     if len(sys.argv) != 2:
         print(json.dumps({}))
         sys.exit(0)

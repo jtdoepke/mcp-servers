@@ -24,7 +24,7 @@ def get_github_api_headers() -> Dict[str, str]:
     """Get headers for GitHub API requests, including auth token if available."""
     headers = {
         "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "mcp-servers-version-discovery/1.0"
+        "User-Agent": "mcp-servers-version-discovery/1.0",
     }
 
     # Add GitHub token if available in environment
@@ -85,16 +85,17 @@ def is_semver_like(version: str) -> bool:
     """Check if a version string looks like semantic versioning."""
     # Match patterns like: v1.0.0, 1.0.0, 2025.7.1, v2025.7.1
     patterns = [
-        r'^v?\d+\.\d+\.\d+$',  # Standard semver
-        r'^\d{4}\.\d{1,2}\.\d{1,2}$',  # Date-based versioning
-        r'^v?\d{4}\.\d{1,2}\.\d{1,2}$',  # Date-based with v prefix
+        r"^v?\d+\.\d+\.\d+$",  # Standard semver
+        r"^\d{4}\.\d{1,2}\.\d{1,2}$",  # Date-based versioning
+        r"^v?\d{4}\.\d{1,2}\.\d{1,2}$",  # Date-based with v prefix
     ]
 
     return any(re.match(pattern, version) for pattern in patterns)
 
 
-def filter_versions(versions: Dict[str, str], excluded_versions: List[str],
-                   excluded_hashes: List[str]) -> Dict[str, str]:
+def filter_versions(
+    versions: Dict[str, str], excluded_versions: List[str], excluded_hashes: List[str]
+) -> Dict[str, str]:
     """Filter versions against exclusion lists."""
     filtered = {}
 
@@ -104,7 +105,9 @@ def filter_versions(versions: Dict[str, str], excluded_versions: List[str],
             continue
 
         if commit_hash in excluded_hashes:
-            print(f"  Excluding version {version} (commit {commit_hash} in excluded_hashes)")
+            print(
+                f"  Excluding version {version} (commit {commit_hash} in excluded_hashes)"
+            )
             continue
 
         filtered[version] = commit_hash
@@ -112,8 +115,9 @@ def filter_versions(versions: Dict[str, str], excluded_versions: List[str],
     return filtered
 
 
-def discover_versions_for_repo(repo_url: str, excluded_versions: List[str],
-                              excluded_hashes: List[str]) -> Dict[str, str]:
+def discover_versions_for_repo(
+    repo_url: str, excluded_versions: List[str], excluded_hashes: List[str]
+) -> Dict[str, str]:
     """Discover new versions for a repository."""
     repo_info = parse_github_repo_url(repo_url)
     if not repo_info:
@@ -168,7 +172,7 @@ def discover_versions_for_repo(repo_url: str, excluded_versions: List[str],
 def load_versions_config(config_path: Path) -> Dict:
     """Load existing versions.json configuration."""
     try:
-        with open(config_path, 'r') as f:
+        with open(config_path, "r") as f:
             return json.load(f)
     except FileNotFoundError:
         print(f"Warning: {config_path} not found")
@@ -197,13 +201,20 @@ def find_versions_configs(root_dir: Path) -> List[Path]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Discover new versions for MCP servers")
-    parser.add_argument("--root", type=Path, default=Path("."),
-                       help="Root directory of the repository")
-    parser.add_argument("--server", type=str,
-                       help="Specific server to check (default: all)")
-    parser.add_argument("--dry-run", action="store_true",
-                       help="Show what would be discovered without making changes")
+    parser = argparse.ArgumentParser(
+        description="Discover new versions for MCP servers"
+    )
+    parser.add_argument(
+        "--root", type=Path, default=Path("."), help="Root directory of the repository"
+    )
+    parser.add_argument(
+        "--server", type=str, help="Specific server to check (default: all)"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be discovered without making changes",
+    )
 
     args = parser.parse_args()
 
@@ -240,7 +251,9 @@ def main():
         excluded_hashes = config.get("excluded_hashes", [])
 
         # Discover new versions
-        discovered = discover_versions_for_repo(repo_url, excluded_versions, excluded_hashes)
+        discovered = discover_versions_for_repo(
+            repo_url, excluded_versions, excluded_hashes
+        )
 
         # Find truly new versions (not in current config)
         new_versions = {}
@@ -264,7 +277,9 @@ def main():
             print(f"  {server_name}: {', '.join(versions.keys())}")
 
         if not args.dry_run:
-            print("\nUse create-version-pr.py to create pull requests for these updates")
+            print(
+                "\nUse create-version-pr.py to create pull requests for these updates"
+            )
     else:
         print("No new versions discovered")
 
