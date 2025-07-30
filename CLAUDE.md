@@ -12,7 +12,7 @@ This repository builds Docker containers for MCP (Model Context Protocol) server
 - **src/{server-name}/** - Individual MCP server implementations, each with its own Dockerfile and versions.json
 - **scripts/** - Utility scripts for security verification and automation
 - **docker-compose.yml** - Container orchestration (placeholder)
-- **.github/actions/** - CI/CD workflows for security scanning, automated builds, and version discovery
+- **.github/workflows/** - CI/CD workflows for security scanning, automated builds, and version discovery
 
 ### Version Management System
 Each MCP server has its own `versions.json` configuration file at `src/{server-name}/versions.json`:
@@ -113,7 +113,7 @@ ghcr.io/jtdoepke/mcp-servers:sequentialthinking-v1.0.0-20250130
 
 ## GitHub Actions Configuration
 
-### Daily Rebuild Workflow (`.github/actions/releases.yml`)
+### Daily Rebuild Workflow (`.github/workflows/releases.yml`)
 - **Trigger**: Daily schedule (respects GitHub free tier limits)
 - **Matrix strategy**: Dynamically generated from all `versions.json` files
 - **Security pipeline**: Base image verification, vulnerability scanning, container signing
@@ -161,6 +161,6 @@ When upstream versions are discovered to have security issues:
 
 - `src/*/versions.json` - Version configuration and exclusion lists for each server
 - `src/*/Dockerfile` - Multi-stage container definitions with security focus
-- `.github/actions/releases.yml` - Daily rebuild pipeline with security controls
+- `.github/workflows/releases.yml` - Daily rebuild pipeline with security controls
 - `.pre-commit-config.yaml` - Comprehensive security scanning hooks
 - `scripts/verify_commit.sh` - Manual commit signature verification utility
