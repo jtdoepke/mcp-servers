@@ -139,13 +139,42 @@ jobs:
           done <<< "${{ steps.versions.outputs.versions }}"
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          input: '${{ matrix.server }}-*.tar'
-          format: 'sarif'
-          output: 'trivy-results-${{ matrix.server }}.sarif'
-          severity: 'CRITICAL,HIGH,MEDIUM'
-          exit-code: '1'
+        run: |
+          echo "Scanning containers for ${{ matrix.server }}"
+
+          # Scan all built containers
+          has_vulnerabilities=false
+          while IFS=: read -r version hash; do
+            if [ -z "$version" ] || [ -z "$hash" ]; then
+              continue
+            fi
+
+            echo "Scanning ${{ matrix.server }}-$version.tar"
+
+            # Run trivy scan
+            if trivy image \
+              --input "${{ matrix.server }}-$version.tar" \
+              --format sarif \
+              --output "trivy-results-${{ matrix.server }}-$version.sarif" \
+              --severity CRITICAL,HIGH,MEDIUM \
+              --exit-code 1; then
+              echo "✓ No critical vulnerabilities found in $version"
+            else
+              echo "❌ Vulnerabilities found in $version"
+              has_vulnerabilities=true
+            fi
+          done <<< "${{ steps.versions.outputs.versions }}"
+
+          # Combine all SARIF reports
+          echo "Combining SARIF reports"
+          first_file=$(find . -name "trivy-results-${{ matrix.server }}-*.sarif" -print -quit)
+          cp "$first_file" "trivy-results-${{ matrix.server }}.sarif"
+
+          # If vulnerabilities were found, exit with error
+          if [ "$has_vulnerabilities" = true ]; then
+            echo "Security vulnerabilities detected!"
+            exit 1
+          fi
 
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
