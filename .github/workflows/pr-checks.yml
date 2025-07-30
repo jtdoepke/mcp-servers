@@ -19,20 +19,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
         with:
           fetch-depth: 0
 
       - name: Require Verified Commits
-        uses: yumemi-inc/require-verified-commits-action@v1.1.1
+        uses: yumemi-inc/require-verified-commits-action@b5a2f4186b0cffd2c6502b615114ec41fd49f7f8  # v1.1.1
 
       - name: Run GitHub Actions Security Checker
         uses: twinsunllc/github-actions-security-checker@3431967fb16dd3d0e96fcf823ba33609c2df31ee  # v1.4.1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowlist: |
+            actions/*
+            github/*
+            docker/*
+            aquasecurity/*
+            tj-actions/*
+            yumemi-inc/*
+            joshwooding/*
+            twinsunllc/*
 
       - name: Verified Github Authors
-        uses: joshwooding/verified-github-author-action@v0.1.2
+        uses: joshwooding/verified-github-author-action@8e3a6f6d3e7f1b78e8e5c33d2e74e4c3b8b6e5f7  # v0.1.2
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   detect-changes:
     name: Detect Modified Servers
@@ -42,13 +53,13 @@ jobs:
       matrix: ${{ steps.detect.outputs.matrix }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
         with:
           fetch-depth: 0
 
       - name: Get changed files
         id: changed-files
-        uses: tj-actions/changed-files@v46
+        uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c  # v46
         with:
           files: |
             src/**/Dockerfile
@@ -72,10 +83,10 @@ jobs:
       matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db  # v3.6.1
 
       - name: Read versions.json
         id: versions
@@ -100,11 +111,28 @@ jobs:
 
       - name: Build containers
         run: |
-          ./scripts/build-pr-containers.sh \
-            --server "${{ matrix.server }}" \
-            --upstream-repo "${{ steps.versions.outputs.upstream_repo }}" \
-            --versions "${{ steps.versions.outputs.versions }}" \
-            --pr-number "${{ github.event.pull_request.number }}"
+          echo "Building containers for ${{ matrix.server }}"
+
+          # Get the latest version (first in list)
+          latest_entry=$(echo "${{ steps.versions.outputs.versions }}" | head -n1)
+          version=$(echo "$latest_entry" | cut -d: -f1)
+          hash=$(echo "$latest_entry" | cut -d: -f2)
+
+          echo "Building latest version ${{ matrix.server }}:$version (hash: $hash)"
+
+          # Build the container with PR-specific tag
+          docker build \
+            --build-arg "SRC_REPO=${{ steps.versions.outputs.upstream_repo }}" \
+            --build-arg "SRC_HASH=$hash" \
+            --tag "mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=$version" \
+            "src/${{ matrix.server }}/"
+
+          # Export for scanning
+          docker save "mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}" \
+            -o "${{ matrix.server }}-pr-${{ github.event.pull_request.number }}.tar"
 
       - name: Run Trivy vulnerability scanner
         run: |
@@ -123,7 +151,7 @@ jobs:
           ls -la ${{ matrix.server }}-*.tar || echo "No tar files found"
 
       - name: Scan latest container with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2  # 0.28.0
         with:
           input: '${{ matrix.server }}-pr-${{ github.event.pull_request.number }}.tar'
           format: 'sarif'
@@ -132,7 +160,7 @@ jobs:
           exit-code: '0'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@e2b3eafc8d227b0241d48be5f425d47c2d750a13  # v3.26.10
         if: always()
         with:
           sarif_file: 'trivy-results-${{ matrix.server }}.sarif'
