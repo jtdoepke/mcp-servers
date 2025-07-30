@@ -1,0 +1,242 @@
+---
+name: PR Checks
+
+'on':
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'src/**'
+      - '.github/workflows/pr-checks.yml'
+
+permissions:
+  contents: read
+  pull-requests: read
+  security-events: write
+
+jobs:
+  detect-changes:
+    name: Detect Modified Servers
+    runs-on: ubuntu-latest
+    outputs:
+      servers: ${{ steps.detect.outputs.servers }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            src/**/Dockerfile
+            src/**/versions.json
+          dir_names: true
+          dir_names_max_depth: 2
+
+      - name: Detect modified servers
+        id: detect
+        run: |
+          echo "Modified directories: ${{ steps.changed-files.outputs.all_changed_files }}"
+
+          # Extract server names from modified paths
+          servers=""
+          matrix_json='{"include":['
+          first=true
+
+          for dir in ${{ steps.changed-files.outputs.all_changed_files }}; do
+            if [[ "$dir" =~ ^src/([^/]+)$ ]]; then
+              server_name="${BASH_REMATCH[1]}"
+              if [ -f "src/$server_name/versions.json" ]; then
+                servers="$servers $server_name"
+
+                # Build matrix entry
+                if [ "$first" = false ]; then
+                  matrix_json+=','
+                fi
+                matrix_json+="{\"server\":\"$server_name\"}"
+                first=false
+              fi
+            fi
+          done
+
+          matrix_json+=']}'
+
+          if [ -z "$servers" ]; then
+            echo "No server modifications detected"
+            echo "servers=" >> "$GITHUB_OUTPUT"
+            echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Modified servers:$servers"
+            echo "servers=$servers" >> "$GITHUB_OUTPUT"
+            echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-and-scan:
+    name: Build and Scan ${{ matrix.server }}
+    needs: detect-changes
+    if: needs.detect-changes.outputs.servers != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Read versions.json
+        id: versions
+        run: |
+          if [ ! -f "src/${{ matrix.server }}/versions.json" ]; then
+            echo "versions.json not found for ${{ matrix.server }}"
+            exit 1
+          fi
+
+          # Extract upstream repo and versions
+          upstream_repo=$(jq -r '.upstream_repo' "src/${{ matrix.server }}/versions.json")
+          echo "upstream_repo=$upstream_repo" >> "$GITHUB_OUTPUT"
+
+          # Get all versions to build
+          versions=$(jq -r '.versions | to_entries | .[] | "\(.key):\(.value)"' \
+            "src/${{ matrix.server }}/versions.json")
+          {
+            echo "versions<<EOF"
+            echo "$versions"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build containers
+        run: |
+          echo "Building containers for ${{ matrix.server }}"
+
+          # Read versions and build each one
+          while IFS=: read -r version hash; do
+            if [ -z "$version" ] || [ -z "$hash" ]; then
+              continue
+            fi
+
+            echo "Building ${{ matrix.server }}:$version (hash: $hash)"
+
+            # Build the container
+            docker build \
+              --build-arg "SRC_REPO=${{ steps.versions.outputs.upstream_repo }}" \
+              --build-arg "SRC_HASH=$hash" \
+              --tag "mcp-${{ matrix.server }}:$version" \
+              --tag "mcp-${{ matrix.server }}:$version-pr-${{ github.event.pull_request.number }}" \
+              --tag "mcp-${{ matrix.server }}:latest-pr" \
+              --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+              --label "org.opencontainers.image.revision=${{ github.sha }}" \
+              --label "org.opencontainers.image.version=$version" \
+              "src/${{ matrix.server }}/"
+
+            # Export for scanning
+            docker save "mcp-${{ matrix.server }}:$version" -o "${{ matrix.server }}-$version.tar"
+          done <<< "${{ steps.versions.outputs.versions }}"
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          input: '${{ matrix.server }}-*.tar'
+          format: 'sarif'
+          output: 'trivy-results-${{ matrix.server }}.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '1'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results-${{ matrix.server }}.sarif'
+          category: 'trivy-${{ matrix.server }}'
+
+      - name: Verify non-root user
+        run: |
+          echo "Verifying containers run as non-root user"
+
+          while IFS=: read -r version hash; do
+            if [ -z "$version" ] || [ -z "$hash" ]; then
+              continue
+            fi
+
+            echo "Checking ${{ matrix.server }}:$version"
+
+            # Get the user the container runs as
+            user=$(docker inspect "mcp-${{ matrix.server }}:$version" --format='{{.Config.User}}')
+
+            if [ -z "$user" ] || [ "$user" = "root" ] || [ "$user" = "0" ]; then
+              echo "ERROR: Container ${{ matrix.server }}:$version runs as root user!"
+              exit 1
+            else
+              echo "✓ Container runs as non-root user: $user"
+            fi
+          done <<< "${{ steps.versions.outputs.versions }}"
+
+      - name: Test container startup
+        run: |
+          echo "Testing container startup for ${{ matrix.server }}"
+
+          # Get the latest version to test
+          latest_version=$(echo "${{ steps.versions.outputs.versions }}" | head -n1 | cut -d: -f1)
+
+          if [ -n "$latest_version" ]; then
+            echo "Testing ${{ matrix.server }}:$latest_version"
+
+            # Try to start the container and check if it starts successfully
+            container_name="test-${{ matrix.server }}"
+            if docker run --rm -d --name "$container_name" "mcp-${{ matrix.server }}:$latest_version"; then
+              sleep 5
+
+              # Check if container is still running
+              if docker ps | grep -q "$container_name"; then
+                echo "✓ Container started successfully"
+                docker stop "$container_name" || true
+              else
+                echo "⚠ Container exited after startup"
+                docker logs "$container_name" || true
+              fi
+            else
+              echo "ERROR: Failed to start container"
+              exit 1
+            fi
+          fi
+
+  summary:
+    name: PR Check Summary
+    needs: [detect-changes, build-and-scan]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          if [ "${{ needs.detect-changes.outputs.servers }}" = "" ]; then
+            {
+              echo "## ✅ No MCP server changes detected"
+              echo "No containers were built or scanned."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## 🔍 PR Container Security Check Results"
+              echo ""
+              echo "**Modified servers:** ${{ needs.detect-changes.outputs.servers }}"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            if [ "${{ needs.build-and-scan.result }}" = "success" ]; then
+              {
+                echo "### ✅ All security checks passed"
+                echo "- Containers built successfully"
+                echo "- No critical vulnerabilities found"
+                echo "- All containers run as non-root user"
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              {
+                echo "### ❌ Security checks failed"
+                echo "Please review the job logs and security scan results."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
