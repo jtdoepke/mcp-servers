@@ -41,7 +41,7 @@ jobs:
             twinsunllc/*
 
       - name: Verified Github Authors
-        uses: joshwooding/verified-github-author-action@8e3a6f6d3e7f1b78e8e5c33d2e74e4c3b8b6e5f7  # v0.1.2
+        uses: joshwooding/verified-github-author-action@90bd2655ef97f18e5a32a9aff1d133f375a97e4c  # v0.2.0
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
