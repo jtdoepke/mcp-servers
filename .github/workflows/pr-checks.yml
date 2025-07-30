@@ -14,6 +14,26 @@ permissions:
   security-events: write
 
 jobs:
+  security-validation:
+    name: Security Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require Verified Commits
+        uses: yumemi-inc/require-verified-commits-action@v1.1.1
+
+      - name: Run GitHub Actions Security Checker
+        uses: twinsunllc/github-actions-security-checker@3431967fb16dd3d0e96fcf823ba33609c2df31ee  # v1.4.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verified Github Authors
+        uses: joshwooding/verified-github-author-action@v0.1.2
+
   detect-changes:
     name: Detect Modified Servers
     runs-on: ubuntu-latest
@@ -40,40 +60,7 @@ jobs:
       - name: Detect modified servers
         id: detect
         run: |
-          echo "Modified directories: ${{ steps.changed-files.outputs.all_changed_files }}"
-
-          # Extract server names from modified paths
-          servers=""
-          matrix_json='{"include":['
-          first=true
-
-          for dir in ${{ steps.changed-files.outputs.all_changed_files }}; do
-            if [[ "$dir" =~ ^src/([^/]+)$ ]]; then
-              server_name="${BASH_REMATCH[1]}"
-              if [ -f "src/$server_name/versions.json" ]; then
-                servers="$servers $server_name"
-
-                # Build matrix entry
-                if [ "$first" = false ]; then
-                  matrix_json+=','
-                fi
-                matrix_json+="{\"server\":\"$server_name\"}"
-                first=false
-              fi
-            fi
-          done
-
-          matrix_json+=']}'
-
-          if [ -z "$servers" ]; then
-            echo "No server modifications detected"
-            echo "servers=" >> "$GITHUB_OUTPUT"
-            echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
-          else
-            echo "Modified servers:$servers"
-            echo "servers=$servers" >> "$GITHUB_OUTPUT"
-            echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
-          fi
+          ./scripts/detect-changed-servers.sh --changed-files "${{ steps.changed-files.outputs.all_changed_files }}"
 
   build-and-scan:
     name: Build and Scan ${{ matrix.server }}
@@ -113,28 +100,11 @@ jobs:
 
       - name: Build containers
         run: |
-          echo "Building containers for ${{ matrix.server }}"
-
-          # Get the latest version (first in list)
-          latest_entry=$(echo "${{ steps.versions.outputs.versions }}" | head -n1)
-          version=$(echo "$latest_entry" | cut -d: -f1)
-          hash=$(echo "$latest_entry" | cut -d: -f2)
-
-          echo "Building latest version ${{ matrix.server }}:$version (hash: $hash)"
-
-          # Build the container with PR-specific tag
-          docker build \
-            --build-arg "SRC_REPO=${{ steps.versions.outputs.upstream_repo }}" \
-            --build-arg "SRC_HASH=$hash" \
-            --tag "mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}" \
-            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-            --label "org.opencontainers.image.revision=${{ github.sha }}" \
-            --label "org.opencontainers.image.version=$version" \
-            "src/${{ matrix.server }}/"
-
-          # Export for scanning
-          docker save "mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}" \
-            -o "${{ matrix.server }}-pr-${{ github.event.pull_request.number }}.tar"
+          ./scripts/build-pr-containers.sh \
+            --server "${{ matrix.server }}" \
+            --upstream-repo "${{ steps.versions.outputs.upstream_repo }}" \
+            --versions "${{ steps.versions.outputs.versions }}" \
+            --pr-number "${{ github.event.pull_request.number }}"
 
       - name: Run Trivy vulnerability scanner
         run: |
@@ -217,36 +187,64 @@ jobs:
 
   summary:
     name: PR Check Summary
-    needs: [detect-changes, build-and-scan]
+    needs: [security-validation, detect-changes, build-and-scan]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Summary
         run: |
+          {
+            echo "## 🔍 PR Security Check Results"
+            echo ""
+            echo "### Security Validation"
+            if [ "${{ needs.security-validation.result }}" = "success" ]; then
+              echo "✅ **Security validation passed**"
+              echo "- Verified commits checked"
+              echo "- GitHub Actions security validated"
+              echo "- Author verification completed"
+            else
+              echo "❌ **Security validation failed**"
+              echo "Please review security validation logs."
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
           if [ "${{ needs.detect-changes.outputs.servers }}" = "" ]; then
             {
-              echo "## ✅ No MCP server changes detected"
+              echo "### Container Changes"
+              echo "✅ **No MCP server changes detected**"
               echo "No containers were built or scanned."
             } >> "$GITHUB_STEP_SUMMARY"
           else
             {
-              echo "## 🔍 PR Container Security Check Results"
-              echo ""
+              echo "### Container Security Check"
               echo "**Modified servers:** ${{ needs.detect-changes.outputs.servers }}"
               echo ""
             } >> "$GITHUB_STEP_SUMMARY"
 
             if [ "${{ needs.build-and-scan.result }}" = "success" ]; then
               {
-                echo "### ✅ All security checks passed"
+                echo "✅ **All container security checks passed**"
                 echo "- Containers built successfully"
                 echo "- No critical vulnerabilities found"
                 echo "- All containers run as non-root user"
               } >> "$GITHUB_STEP_SUMMARY"
             else
               {
-                echo "### ❌ Security checks failed"
+                echo "❌ **Container security checks failed**"
                 echo "Please review the job logs and security scan results."
               } >> "$GITHUB_STEP_SUMMARY"
             fi
+          fi
+
+          # Overall result
+          if [ "${{ needs.security-validation.result }}" = "success" ] && \
+            { [ "${{ needs.detect-changes.outputs.servers }}" = "" ] || \
+              [ "${{ needs.build-and-scan.result }}" = "success" ]; }; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "🎉 **All PR checks passed!**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "⚠️ **Some PR checks failed - please review and fix**" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
