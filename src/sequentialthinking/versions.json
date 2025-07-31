@@ -1,0 +1,9 @@
+{
+  "upstream_repo": "https://github.com/modelcontextprotocol/servers",
+  "versions": {
+    "2025.7.1": "43438d143cb4caf063bb60489f4f60d144123b4b",
+    "2025.4.24": "83dd224982252e34100d454c34fa27fe38f71e20"
+  },
+  "excluded_versions": [],
+  "excluded_hashes": []
+}

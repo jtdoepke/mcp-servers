@@ -1,0 +1,64 @@
+# Security-First Node.js MCP Server Template (Slim - Alternative)
+#
+# This template uses Node.js slim images with explicit non-root user creation:
+# - Creates dedicated non-root user
+# - Runs as non-root user (custom UID)
+# - Multi-stage build for clean separation
+# - Proper file ownership and permissions
+# - More flexibility than Distroless (has shell for debugging)
+
+ARG SRC_REPO=https://github.com/example/mcp-server-repo
+ARG SRC_HASH=
+
+# BUILD STAGE - Full Node.js image for building
+FROM node:24 AS builder
+
+# Install git for cloning repositories
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends git
+
+# Clone source repository
+RUN git clone "$SRC_REPO" /repo
+
+WORKDIR /repo
+
+# Checkout specific commit hash for security
+RUN git checkout "$SRC_HASH"
+
+# For monorepo structures, cd to the specific server directory
+# WORKDIR /repo/src/your-server-name
+
+# Install dependencies
+RUN --mount=type=cache,target=/root/.npm \
+    npm install
+
+# Run TypeScript build (if applicable)
+RUN npm run build
+
+# Install production dependencies only
+RUN --mount=type=cache,target=/root/.npm-production \
+    npm ci --ignore-scripts --omit=dev
+
+# RUNTIME STAGE - Slim image with explicit non-root user
+FROM node:24-slim
+
+# Create a non-root user and group
+RUN groupadd --gid 1001 --system nodejs && \
+    useradd --uid 1001 --system --gid nodejs --shell /bin/false nodejs
+
+WORKDIR /app
+ENV NODE_ENV=production
+
+# Copy built application with proper ownership for non-root user
+COPY --from=builder --chown=nodejs:nodejs /repo/dist /app/dist
+COPY --from=builder --chown=nodejs:nodejs /repo/node_modules /app/node_modules
+COPY --from=builder --chown=nodejs:nodejs /repo/package.json /app/package.json
+
+# Switch to non-root user
+USER nodejs
+
+# Use array form for ENTRYPOINT for better signal handling
+ENTRYPOINT ["node", "dist/index.js"]
+
+# Health check (optional - adjust command as needed)
+# HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+#   CMD node -e "process.exit(0)" || exit 1

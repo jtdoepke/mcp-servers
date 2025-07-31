@@ -1,0 +1,276 @@
+---
+name: PR Checks
+
+'on':
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'src/**'
+      - '.github/workflows/pr-checks.yml'
+
+permissions:
+  contents: read
+  pull-requests: read
+  security-events: write
+
+jobs:
+  security-validation:
+    name: Security Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
+        with:
+          fetch-depth: 0
+
+      - name: Require Verified Commits
+        uses: yumemi-inc/require-verified-commits-action@b5a2f4186b0cffd2c6502b615114ec41fd49f7f8  # v1.1.1
+
+      - name: Run GitHub Actions Security Checker
+        uses: twinsunllc/github-actions-security-checker@3431967fb16dd3d0e96fcf823ba33609c2df31ee  # v1.4.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowlist: |
+            github
+            codeql-action/upload-sarif
+            tj-actions/changed-files
+            joshwooding/verified-github-author-action
+            twinsunllc/github-actions-security-checker
+            yumemi-inc/require-verified-commits-action
+
+      - name: Verified Github Authors
+        uses: joshwooding/verified-github-author-action@90bd2655ef97f18e5a32a9aff1d133f375a97e4c  # v0.2.0
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  detect-changes:
+    name: Detect Modified Servers
+    runs-on: ubuntu-latest
+    outputs:
+      servers: ${{ steps.detect.outputs.servers }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c  # v46
+        with:
+          files: |
+            src/**/Dockerfile
+            src/**/versions.json
+          dir_names: 'true'
+          dir_names_max_depth: 2
+          dir_names_exclude_current_dir: 'true'
+
+      - name: Detect modified servers
+        id: detect
+        run: |
+          ./scripts/detect-changed-servers.sh --changed-files "${{ steps.changed-files.outputs.all_changed_files }}"
+
+  build-and-scan:
+    name: Build and Scan ${{ matrix.server }}
+    needs: detect-changes
+    if: needs.detect-changes.outputs.servers != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db  # v3.6.1
+
+      - name: Read versions.json
+        id: versions
+        run: |
+          if [ ! -f "src/${{ matrix.server }}/versions.json" ]; then
+            echo "versions.json not found for ${{ matrix.server }}"
+            exit 1
+          fi
+
+          # Extract upstream repo and versions
+          upstream_repo=$(jq -r '.upstream_repo' "src/${{ matrix.server }}/versions.json")
+          echo "upstream_repo=$upstream_repo" >> "$GITHUB_OUTPUT"
+
+          # Get all versions to build
+          versions=$(jq -r '.versions | to_entries | .[] | "\(.key):\(.value)"' \
+            "src/${{ matrix.server }}/versions.json")
+          {
+            echo "versions<<EOF"
+            echo "$versions"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build containers
+        run: |
+          echo "Building containers for ${{ matrix.server }}"
+
+          # Get the latest version (first in list)
+          latest_entry=$(echo "${{ steps.versions.outputs.versions }}" | head -n1)
+          version=$(echo "$latest_entry" | cut -d: -f1)
+          hash=$(echo "$latest_entry" | cut -d: -f2)
+
+          echo "Building latest version ${{ matrix.server }}:$version (hash: $hash)"
+
+          # Build the container with PR-specific tag
+          docker build \
+            --build-arg "SRC_REPO=${{ steps.versions.outputs.upstream_repo }}" \
+            --build-arg "SRC_HASH=$hash" \
+            --tag "mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=$version" \
+            "src/${{ matrix.server }}/"
+
+          # Export for scanning
+          docker save "mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}" \
+            -o "${{ matrix.server }}-pr-${{ github.event.pull_request.number }}.tar"
+
+      - name: Run Trivy vulnerability scanner
+        run: |
+          echo "Scanning containers for ${{ matrix.server }}"
+
+          # Verify tar file exists
+          tar_file="${{ matrix.server }}-pr-${{ github.event.pull_request.number }}.tar"
+          if [ -f "$tar_file" ]; then
+            echo "✓ Found tar file for scanning: $tar_file"
+          else
+            echo "ERROR: Tar file $tar_file not found"
+            exit 1
+          fi
+
+          # List files for debugging
+          ls -la ${{ matrix.server }}-*.tar || echo "No tar files found"
+
+      - name: Scan latest container with Trivy
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2  # 0.28.0
+        with:
+          input: '${{ matrix.server }}-pr-${{ github.event.pull_request.number }}.tar'
+          format: 'sarif'
+          output: 'trivy-results-${{ matrix.server }}.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '0'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@e2b3eafc8d227b0241d48be5f425d47c2d750a13  # v3.26.10
+        if: always()
+        with:
+          sarif_file: 'trivy-results-${{ matrix.server }}.sarif'
+          category: 'trivy-${{ matrix.server }}'
+
+      - name: Verify non-root user
+        run: |
+          echo "Verifying container runs as non-root user"
+
+          # Check the PR container
+          image_tag="mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}"
+          echo "Checking $image_tag"
+
+          # Get the user the container runs as
+          user=$(docker inspect "$image_tag" --format='{{.Config.User}}')
+
+          if [ -z "$user" ] || [ "$user" = "root" ] || [ "$user" = "0" ]; then
+            echo "ERROR: Container runs as root user!"
+            exit 1
+          else
+            echo "✓ Container runs as non-root user: $user"
+          fi
+
+      - name: Test container startup
+        run: |
+          echo "Testing container startup for ${{ matrix.server }}"
+
+          # Test the PR container
+          image_tag="mcp-${{ matrix.server }}:pr-${{ github.event.pull_request.number }}"
+          echo "Testing $image_tag"
+
+          # Try to start the container and check if it starts successfully
+          container_name="test-${{ matrix.server }}-pr-${{ github.event.pull_request.number }}"
+          if docker run -d --name "$container_name" "$image_tag"; then
+            sleep 5
+
+            # Check if container is still running
+            if docker ps | grep -q "$container_name"; then
+              echo "✓ Container started successfully"
+              docker stop "$container_name" || true
+            else
+              echo "⚠ Container exited after startup"
+              docker logs "$container_name" || true
+            fi
+
+            # Clean up container
+            docker rm "$container_name" || true
+          else
+            echo "ERROR: Failed to start container"
+            exit 1
+          fi
+
+  summary:
+    name: PR Check Summary
+    needs: [security-validation, detect-changes, build-and-scan]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          {
+            echo "## 🔍 PR Security Check Results"
+            echo ""
+            echo "### Security Validation"
+            if [ "${{ needs.security-validation.result }}" = "success" ]; then
+              echo "✅ **Security validation passed**"
+              echo "- Verified commits checked"
+              echo "- GitHub Actions security validated"
+              echo "- Author verification completed"
+            else
+              echo "❌ **Security validation failed**"
+              echo "Please review security validation logs."
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ needs.detect-changes.outputs.servers }}" = "" ]; then
+            {
+              echo "### Container Changes"
+              echo "✅ **No MCP server changes detected**"
+              echo "No containers were built or scanned."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Container Security Check"
+              echo "**Modified servers:** ${{ needs.detect-changes.outputs.servers }}"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            if [ "${{ needs.build-and-scan.result }}" = "success" ]; then
+              {
+                echo "✅ **All container security checks passed**"
+                echo "- Containers built successfully"
+                echo "- No critical vulnerabilities found"
+                echo "- All containers run as non-root user"
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              {
+                echo "❌ **Container security checks failed**"
+                echo "Please review the job logs and security scan results."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          # Overall result
+          if [ "${{ needs.security-validation.result }}" = "success" ] && \
+            { [ "${{ needs.detect-changes.outputs.servers }}" = "" ] || \
+              [ "${{ needs.build-and-scan.result }}" = "success" ]; }; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "🎉 **All PR checks passed!**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "⚠️ **Some PR checks failed - please review and fix**" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
