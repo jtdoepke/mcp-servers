@@ -157,6 +157,61 @@ When upstream versions are discovered to have security issues:
 4. Update GitHub Actions matrix (auto-detected from config files)
 5. Test local build and security scanning, including non-root validation
 
+## Documentation Requirements
+
+When adding new MCP servers to this repository, the following documentation must be updated in README.md:
+
+### MCP Server Entry Format
+Each server entry must include:
+
+1. **Source Attribution**: Link to original upstream repository and specific subdirectory
+2. **Description**: Brief explanation of server purpose and capabilities (1-2 sentences)
+3. **Docker Configuration**: Complete JSON example for mcpServers configuration
+4. **Environment Variables**: List all supported environment variables with descriptions
+5. **Persistent State**: Document any data persistence requirements or note if stateless
+6. **Available Tags**: List the tagging strategy for the specific server
+
+### Example Entry Template
+```markdown
+### server-name
+
+**Source**: [upstream-org/repository](https://github.com/upstream-org/repository/tree/main/src/server-name)
+
+Brief description of what this server does and its main use cases.
+
+**Docker Configuration Example**:
+```json
+{
+  "mcpServers": {
+    "server-name": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "ghcr.io/jtdoepke/mcp-servers:server-name"
+      ]
+    }
+  }
+}
+```
+
+**Environment Variables**:
+- `VARIABLE_NAME` (required/optional): Description of what this controls
+- `ANOTHER_VAR` (optional): Default value behavior
+
+**Persistent State**: Describe any volumes, databases, or file persistence needs
+
+**Available Tags**: Standard tagging format for this server
+```
+
+### Security Considerations to Document
+When documenting each MCP server, consider highlighting:
+- Any credential requirements or OAuth scopes needed
+- Network access requirements or external service dependencies
+- Data sensitivity levels and privacy implications
+- Recommended security configurations or environment restrictions
+
 ## Key Files
 
 - `src/*/versions.json` - Version configuration and exclusion lists for each server
