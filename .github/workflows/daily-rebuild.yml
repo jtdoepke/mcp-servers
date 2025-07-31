@@ -92,7 +92,7 @@ jobs:
       # Build container with security validation
       - name: Build container with security validation
         id: build
-        uses: docker/build-push-action@5176d81f87c23d6fc96624dfdbcd554c9bc3a9c # v6.9.0
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
           context: .
           file: ${{ matrix.dockerfile_path }}
@@ -140,7 +140,7 @@ jobs:
 
       # Push container images to registry
       - name: Push container images
-        uses: docker/build-push-action@5176d81f87c23d6fc96624dfdbcd554c9bc3a9c # v6.9.0
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
           context: .
           file: ${{ matrix.dockerfile_path }}

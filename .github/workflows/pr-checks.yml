@@ -31,14 +31,12 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           allowlist: |
-            actions/*
-            github/*
-            docker/*
-            aquasecurity/*
-            tj-actions/*
-            yumemi-inc/*
-            joshwooding/*
-            twinsunllc/*
+            github
+            codeql-action/upload-sarif
+            tj-actions/changed-files
+            joshwooding/verified-github-author-action
+            twinsunllc/github-actions-security-checker
+            yumemi-inc/require-verified-commits-action
 
       - name: Verified Github Authors
         uses: joshwooding/verified-github-author-action@90bd2655ef97f18e5a32a9aff1d133f375a97e4c  # v0.2.0
